@@ -93,7 +93,7 @@ class AcousticReceiverService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_SEND -> {
-                val frame = intent.getByteArrayExtra(EXTRA_FRAME)
+                val frame = intent?.getByteArrayExtra(EXTRA_FRAME)
                 if (frame != null) outbound.offer(frame)
                 startForegroundIfAllowed()
                 startWorkerIfNeeded()

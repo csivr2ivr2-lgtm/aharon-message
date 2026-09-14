@@ -2,7 +2,7 @@ name: Android CI
 
 on:
   push:
-    branches: [ main, feat/user-v1 ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
 
@@ -41,7 +41,7 @@ jobs:
           gradle --no-daemon --stacktrace assembleDebug 2>&1 | tee assemble.log
 
       - name: Report diagnostics to PR
-        if: always() && (steps.tests.outcome == 'failure' || steps.apk.outcome == 'failure')
+        if: always() && github.event_name == 'pull_request' && (steps.tests.outcome == 'failure' || steps.apk.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -55,7 +55,7 @@ jobs:
             if [ -f assemble.log ]; then echo '--- assemble ---'; tail -n 180 assemble.log; fi
             echo '```'
           } > ci-comment.md
-          gh pr comment 1 --body-file ci-comment.md || true
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file ci-comment.md || true
 
       - name: Fail job when build failed
         if: always() && (steps.tests.outcome == 'failure' || steps.apk.outcome == 'failure')
