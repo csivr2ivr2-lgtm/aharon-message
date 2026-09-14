@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Aharon Message</string>
+    <string name="receiver_channel_name">Ultrasonic receiver</string>
+    <string name="receiver_channel_description">Keeps Aharon Message listening for nearby ultrasonic messages.</string>
+</resources>
