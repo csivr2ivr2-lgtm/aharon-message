@@ -28,7 +28,7 @@ class Fsk4Modem(
                 (SYNC.size + frame.size * 4) * symbolSamples
         )
         appendTone(output, profile.wakeFrequency, sampleRate * WAKE_MILLIS / 1000)
-        repeat(sampleRate * GUARD_MILLIS / 1000) { output += 0 }
+        repeat(sampleRate * GUARD_MILLIS / 1000) { output += 0.toShort() }
         for (symbol in SYNC) appendTone(output, profile.frequencies[symbol], symbolSamples)
         for (byte in frame) {
             val value = byte.toInt() and 0xff

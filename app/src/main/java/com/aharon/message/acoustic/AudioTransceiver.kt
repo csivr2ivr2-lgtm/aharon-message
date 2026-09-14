@@ -73,14 +73,13 @@ class AudioTransceiver(private val profile: AcousticProfile) : AutoCloseable {
         }
         if (consecutiveWake < modem.requiredWakeWindows()) return null
 
-        // Find the falling edge of the wake tone, then consume the known guard interval.
         var fallingEdgeFound = false
-        repeat(80) {
+        for (ignored in 0 until 80) {
             val window = readExact(record, modem.detectorSamples) ?: return null
             peakDb = maxOf(peakDb, Goertzel.dbFs(window))
             if (!modem.detectWake(window)) {
                 fallingEdgeFound = true
-                return@repeat
+                break
             }
         }
         if (!fallingEdgeFound) return null
