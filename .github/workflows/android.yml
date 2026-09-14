@@ -2,12 +2,13 @@ name: Android CI
 
 on:
   push:
-    branches: [ main, feat/user-v1 ]
+    branches: [ main ]
   pull_request:
     branches: [ main ]
 
 permissions:
   contents: read
+  pull-requests: write
 
 jobs:
   build:
@@ -25,11 +26,43 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.6.0'
+
       - name: Unit tests
-        run: gradle --no-daemon testDebugUnitTest
+        id: tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          gradle --no-daemon testDebugUnitTest 2>&1 | tee unit-test.log
+
       - name: Build debug APK
-        run: gradle --no-daemon assembleDebug
+        id: apk
+        if: steps.tests.outcome == 'success'
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          gradle --no-daemon assembleDebug 2>&1 | tee assemble.log
+
+      - name: Report failure
+        if: always() && (steps.tests.outcome == 'failure' || steps.apk.outcome == 'failure') && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          {
+            echo '### Android CI failure'
+            echo
+            echo '```text'
+            if [ -f unit-test.log ]; then tail -n 180 unit-test.log; fi
+            if [ -f assemble.log ]; then tail -n 180 assemble.log; fi
+            echo '```'
+          } > ci-comment.md
+          gh pr comment "${{ github.event.pull_request.number }}" --body-file ci-comment.md
+
+      - name: Fail job when build failed
+        if: always() && (steps.tests.outcome == 'failure' || steps.apk.outcome == 'failure')
+        run: exit 1
+
       - name: Upload APK
+        if: steps.apk.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: aharon-message-debug
