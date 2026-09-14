@@ -93,7 +93,7 @@ class AcousticReceiverService : Service() {
                 return START_NOT_STICKY
             }
             ACTION_SEND -> {
-                val frame = intent?.getByteArrayExtra(EXTRA_FRAME)
+                val frame = intent.getByteArrayExtra(EXTRA_FRAME)
                 if (frame != null) outbound.offer(frame)
                 startForegroundIfAllowed()
                 startWorkerIfNeeded()
@@ -144,22 +144,23 @@ class AcousticReceiverService : Service() {
             try {
                 while (isActive) {
                     val desired = container.settings.profile()
-                    if (profileId != desired.id) {
+                    if (profileId != desired.id || transceiver == null) {
                         transceiver?.close()
                         transceiver = AudioTransceiver(desired)
                         profileId = desired.id
                     }
+                    val activeTransceiver = checkNotNull(transceiver)
 
                     val outgoing = outbound.poll()
                     if (outgoing != null) {
                         val packet = ProtocolCodec.decode(outgoing)
-                        transceiver.send(outgoing)
+                        activeTransceiver.send(outgoing)
                         if (packet != null) engine.onPacketTransmitted(packet)
                         delay(90L)
                         continue
                     }
 
-                    val received = transceiver.receiveFrame(350L)
+                    val received = activeTransceiver.receiveFrame(350L)
                     if (received != null) {
                         _lastSignalDb.value = received.signalDb
                         val packet = ProtocolCodec.decode(received.bytes)
@@ -176,7 +177,6 @@ class AcousticReceiverService : Service() {
             } catch (_: SecurityException) {
                 stopSelf()
             } catch (_: Throwable) {
-                // Keep the service recoverable. Android may restart it when the user opens the app again.
                 stopSelf()
             } finally {
                 transceiver?.close()

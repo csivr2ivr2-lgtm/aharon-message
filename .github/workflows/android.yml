@@ -21,14 +21,6 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK 37
-        id: sdk
-        continue-on-error: true
-        run: |
-          set -o pipefail
-          sdkmanager "platforms;android-37" "build-tools;36.0.0" 2>&1 | tee sdk.log
-
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.6.0'
@@ -49,17 +41,16 @@ jobs:
           gradle --no-daemon --stacktrace assembleDebug 2>&1 | tee assemble.log
 
       - name: Report diagnostics to PR
-        if: always() && (steps.sdk.outcome == 'failure' || steps.tests.outcome == 'failure' || steps.apk.outcome == 'failure')
+        if: always() && (steps.tests.outcome == 'failure' || steps.apk.outcome == 'failure')
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           {
             echo '### Android CI diagnostics'
             echo
-            echo "SDK: ${{ steps.sdk.outcome }} · tests: ${{ steps.tests.outcome }} · APK: ${{ steps.apk.outcome }}"
+            echo "tests: ${{ steps.tests.outcome }} · APK: ${{ steps.apk.outcome }}"
             echo
             echo '```text'
-            if [ -f sdk.log ]; then echo '--- sdk ---'; tail -n 80 sdk.log; fi
             if [ -f unit-test.log ]; then echo '--- tests ---'; tail -n 220 unit-test.log; fi
             if [ -f assemble.log ]; then echo '--- assemble ---'; tail -n 180 assemble.log; fi
             echo '```'
@@ -67,7 +58,7 @@ jobs:
           gh pr comment 1 --body-file ci-comment.md || true
 
       - name: Fail job when build failed
-        if: always() && (steps.sdk.outcome == 'failure' || steps.tests.outcome == 'failure' || steps.apk.outcome == 'failure')
+        if: always() && (steps.tests.outcome == 'failure' || steps.apk.outcome == 'failure')
         run: exit 1
 
       - name: Upload APK
