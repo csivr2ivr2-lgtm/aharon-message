@@ -2,6 +2,7 @@ package com.aharon.message.engine
 
 import android.content.Context
 import android.util.Base64
+import com.aharon.message.AppSettings
 import com.aharon.message.crypto.IdentityManager
 import com.aharon.message.data.MessageStore
 import com.aharon.message.model.ChatMessage
@@ -28,6 +29,7 @@ class MessagingEngine(
     private val context: Context,
     private val store: MessageStore,
     private val identity: IdentityManager,
+    private val settings: AppSettings,
 ) {
     data class NotificationEvent(val title: String, val body: String)
     data class IncomingResult(
@@ -225,11 +227,15 @@ class MessagingEngine(
         val contact = store.contactByTransportId(packet.senderId) ?: return IncomingResult()
         val fragment = ProtocolCodec.decodeFragmentPayload(packet.payload) ?: return IncomingResult()
         val publicKey = Base64.decode(contact.publicKeyBase64, Base64.NO_WRAP)
-        val protected = Hamming84.decode(fragment.encryptedChunk) ?: return IncomingResult()
+        val encrypted = if (fragment.fecProtected) {
+            Hamming84.decode(fragment.encryptedChunk) ?: return IncomingResult()
+        } else {
+            fragment.encryptedChunk
+        }
         val plaintext = runCatching {
             identity.decrypt(
                 publicKey,
-                protected,
+                encrypted,
                 ProtocolCodec.fragmentAad(packet, fragment.sequence, fragment.total),
             )
         }.getOrNull() ?: return IncomingResult()
@@ -359,6 +365,7 @@ class MessagingEngine(
             .map { part -> ByteArray(part.size) { index -> part[index] } }
         val total = chunks.size.coerceAtLeast(1)
         val publicKey = Base64.decode(contact.publicKeyBase64, Base64.NO_WRAP)
+        val useFec = settings.fecEnabled
 
         return chunks.mapIndexed { sequence, chunk ->
             val shell = ProtocolPacket(
@@ -372,8 +379,15 @@ class MessagingEngine(
                 chunk,
                 ProtocolCodec.fragmentAad(shell, sequence, total),
             )
-            val fec = Hamming84.encode(encrypted)
-            shell.copy(payload = ProtocolCodec.encodeFragmentPayload(sequence, total, fec))
+            val transportBytes = if (useFec) Hamming84.encode(encrypted) else encrypted
+            shell.copy(
+                payload = ProtocolCodec.encodeFragmentPayload(
+                    sequence = sequence,
+                    total = total,
+                    encryptedChunk = transportBytes,
+                    fecProtected = useFec,
+                )
+            )
         }
     }
 
