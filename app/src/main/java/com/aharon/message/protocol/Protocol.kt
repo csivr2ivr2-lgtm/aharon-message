@@ -39,6 +39,7 @@ data class PairPayload(
 data class FragmentPayload(
     val sequence: Int,
     val total: Int,
+    val fecProtected: Boolean,
     val encryptedChunk: ByteArray,
 )
 
@@ -48,8 +49,9 @@ object ProtocolCodec {
     const val CRC_SIZE: Int = 4
     const val MAX_PAYLOAD: Int = 1024
     const val BROADCAST_ID: Long = 0L
-    const val FRAGMENT_HEADER_SIZE: Int = 4
+    const val FRAGMENT_HEADER_SIZE: Int = 5
     const val MESSAGE_CHUNK_BYTES: Int = 96
+    private const val FLAG_FEC = 0x01
 
     fun encode(packet: ProtocolPacket): ByteArray {
         require(packet.payload.size <= MAX_PAYLOAD) { "Payload exceeds $MAX_PAYLOAD bytes" }
@@ -127,37 +129,45 @@ object ProtocolCodec {
         PairPayload(uuid, nameBytes.toString(Charsets.UTF_8), key)
     }.getOrNull()
 
-    fun encodeFragmentPayload(sequence: Int, total: Int, encryptedChunk: ByteArray): ByteArray {
+    fun encodeFragmentPayload(
+        sequence: Int,
+        total: Int,
+        encryptedChunk: ByteArray,
+        fecProtected: Boolean,
+    ): ByteArray {
         require(sequence in 0 until total)
         require(total in 1..65535)
         require(encryptedChunk.size + FRAGMENT_HEADER_SIZE <= MAX_PAYLOAD)
+        val flags = if (fecProtected) FLAG_FEC else 0
         return ByteBuffer.allocate(FRAGMENT_HEADER_SIZE + encryptedChunk.size)
             .order(ByteOrder.BIG_ENDIAN)
             .putShort(sequence.toShort())
             .putShort(total.toShort())
+            .put(flags.toByte())
             .put(encryptedChunk)
             .array()
     }
 
     fun decodeFragmentPayload(payload: ByteArray): FragmentPayload? = runCatching {
-        require(payload.size >= FRAGMENT_HEADER_SIZE + 28) // nonce + GCM tag minimum
+        require(payload.size >= FRAGMENT_HEADER_SIZE + 28)
         val buffer = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
         val sequence = buffer.short.toInt() and 0xffff
         val total = buffer.short.toInt() and 0xffff
+        val flags = buffer.get().toInt() and 0xff
         require(total in 1..65535 && sequence < total)
         val encrypted = ByteArray(buffer.remaining()).also(buffer::get)
-        FragmentPayload(sequence, total, encrypted)
+        FragmentPayload(sequence, total, (flags and FLAG_FEC) != 0, encrypted)
     }.getOrNull()
 
     fun encodeFragmentAck(sequence: Int, total: Int): ByteArray =
-        ByteBuffer.allocate(FRAGMENT_HEADER_SIZE)
+        ByteBuffer.allocate(4)
             .order(ByteOrder.BIG_ENDIAN)
             .putShort(sequence.toShort())
             .putShort(total.toShort())
             .array()
 
     fun decodeFragmentAck(payload: ByteArray): Pair<Int, Int>? = runCatching {
-        require(payload.size == FRAGMENT_HEADER_SIZE)
+        require(payload.size == 4)
         val buffer = ByteBuffer.wrap(payload).order(ByteOrder.BIG_ENDIAN)
         val sequence = buffer.short.toInt() and 0xffff
         val total = buffer.short.toInt() and 0xffff

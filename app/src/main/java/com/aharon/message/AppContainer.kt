@@ -10,5 +10,5 @@ class AppContainer(context: Context) {
     val settings = AppSettings(appContext)
     val store = MessageStore(appContext)
     val identity = IdentityManager(appContext)
-    val engine = MessagingEngine(appContext, store, identity)
+    val engine = MessagingEngine(appContext, store, identity, settings)
 }
