@@ -20,11 +20,15 @@ class FragmentProtocolTest {
 
     @Test
     fun fragmentPayloadCarriesFecFlag() {
-        val protected = Hamming84.encode(byteArrayOf(1, 2, 3, 4))
+        // AES-GCM payloads always contain a 12-byte nonce and 16-byte tag,
+        // so use the real minimum encrypted size before applying Hamming FEC.
+        val encrypted = ByteArray(28) { index -> (index * 7).toByte() }
+        val protected = Hamming84.encode(encrypted)
         val encoded = ProtocolCodec.encodeFragmentPayload(0, 1, protected, fecProtected = true)
         val decoded = requireNotNull(ProtocolCodec.decodeFragmentPayload(encoded))
         assertTrue(decoded.fecProtected)
         assertArrayEquals(protected, decoded.encryptedChunk)
+        assertArrayEquals(encrypted, Hamming84.decode(decoded.encryptedChunk))
     }
 
     @Test
