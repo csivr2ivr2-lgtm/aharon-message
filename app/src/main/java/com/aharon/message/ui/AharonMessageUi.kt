@@ -39,15 +39,17 @@ import androidx.compose.material.icons.filled.MicOff
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.VolumeOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.Divider
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -60,28 +62,28 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.unit.toSize
-import androidx.compose.ui.unit.IntSize
-import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.core.content.ContextCompat
 import com.aharon.message.AppContainer
+import com.aharon.message.acoustic.AcousticCalibrator
 import com.aharon.message.acoustic.AcousticProfile
 import com.aharon.message.model.ChatMessage
 import com.aharon.message.model.Contact
@@ -91,6 +93,9 @@ import com.aharon.message.service.AcousticReceiverService
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private enum class MainTab { CHATS, PAIR, SETTINGS }
 
@@ -98,13 +103,17 @@ private enum class MainTab { CHATS, PAIR, SETTINGS }
 fun AharonMessageRoot(container: AppContainer) {
     val context = LocalContext.current
     var microphoneGranted by remember {
-        mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED)
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+                PackageManager.PERMISSION_GRANTED
+        )
     }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { grants ->
         microphoneGranted = grants[Manifest.permission.RECORD_AUDIO] == true ||
-            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+            ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
+            PackageManager.PERMISSION_GRANTED
         if (microphoneGranted && container.settings.receiverEnabled) {
             AcousticReceiverService.start(context)
         }
@@ -139,7 +148,8 @@ private fun PermissionScreen(onRequest: () -> Unit) {
     ) {
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             Box(
-                modifier = Modifier.size(78.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer),
+                modifier = Modifier.size(78.dp).clip(CircleShape)
+                    .background(MaterialTheme.colorScheme.primaryContainer),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(Icons.Default.Mic, contentDescription = null, modifier = Modifier.size(38.dp))
@@ -148,7 +158,7 @@ private fun PermissionScreen(onRequest: () -> Unit) {
             Text("Aharon Message צריך גישה למיקרופון", fontSize = 22.sp, fontWeight = FontWeight.Bold)
             Spacer(Modifier.height(10.dp))
             Text(
-                "המיקרופון משמש רק לפענוח אותות אולטרסוניים בזמן שהמקלט פעיל. האודיו לא נשמר.",
+                "המיקרופון משמש לפענוח אותות אולטרסוניים בלבד בזמן שהמקלט פעיל. האודיו לא נשמר.",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(24.dp))
@@ -168,12 +178,12 @@ private fun MainApp(container: AppContainer) {
     var tab by remember { mutableStateOf(MainTab.CHATS) }
     var selectedContact by remember { mutableStateOf<Contact?>(null) }
 
-    if (selectedContact != null) {
+    selectedContact?.let { contact ->
         ChatScreen(
-            contact = selectedContact!!,
-            messages = messages.filter { it.contactId == selectedContact!!.deviceId },
+            contact = contact,
+            messages = messages.filter { it.contactId == contact.deviceId },
             onBack = { selectedContact = null },
-            onSend = { container.engine.sendText(selectedContact!!, it) },
+            onSend = { container.engine.sendText(contact, it) },
         )
         return
     }
@@ -187,7 +197,8 @@ private fun MainApp(container: AppContainer) {
                         Text(
                             if (running) "מקלט אולטרסוני פעיל" else "המקלט כבוי",
                             fontSize = 12.sp,
-                            color = if (running) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = if (running) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
                 },
@@ -195,11 +206,14 @@ private fun MainApp(container: AppContainer) {
                     Icon(
                         if (running) Icons.Default.Mic else Icons.Default.MicOff,
                         contentDescription = null,
-                        tint = if (running) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        tint = if (running) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 16.dp),
                     )
                 },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface),
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.surface
+                ),
             )
         },
         bottomBar = {
@@ -223,26 +237,18 @@ private fun MainApp(container: AppContainer) {
                     label = { Text("הגדרות") },
                 )
             }
-        }
+        },
     ) { padding ->
         when (tab) {
             MainTab.CHATS -> ChatsScreen(
-                contacts = contacts,
-                messages = messages,
-                modifier = Modifier.padding(padding),
+                contacts,
+                messages,
+                Modifier.padding(padding),
                 onContact = { selectedContact = it },
                 onOpenPairing = { tab = MainTab.PAIR },
             )
-            MainTab.PAIR -> PairingScreen(
-                container = container,
-                pending = pending,
-                modifier = Modifier.padding(padding),
-            )
-            MainTab.SETTINGS -> SettingsScreen(
-                container = container,
-                running = running,
-                modifier = Modifier.padding(padding),
-            )
+            MainTab.PAIR -> PairingScreen(container, pending, Modifier.padding(padding))
+            MainTab.SETTINGS -> SettingsScreen(container, running, Modifier.padding(padding))
         }
     }
 }
@@ -258,7 +264,12 @@ private fun ChatsScreen(
     if (contacts.isEmpty()) {
         Box(modifier.fillMaxSize().padding(32.dp), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Default.Chat, null, modifier = Modifier.size(54.dp), tint = MaterialTheme.colorScheme.primary)
+                Icon(
+                    Icons.Default.Chat,
+                    null,
+                    modifier = Modifier.size(54.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
                 Spacer(Modifier.height(16.dp))
                 Text("עדיין אין אנשי קשר", fontSize = 21.sp, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.height(8.dp))
@@ -287,11 +298,15 @@ private fun ChatsScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (last != null) {
-                    Text(formatTime(last.timestamp), fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                last?.let {
+                    Text(
+                        formatTime(it.timestamp),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
-            Divider()
+            HorizontalDivider()
         }
     }
 }
@@ -322,14 +337,27 @@ private fun ChatScreen(
                         Column {
                             Text(contact.name, fontWeight = FontWeight.Bold)
                             Row(verticalAlignment = Alignment.CenterVertically) {
-                                Icon(Icons.Default.Lock, null, modifier = Modifier.size(12.dp), tint = MaterialTheme.colorScheme.primary)
+                                Icon(
+                                    Icons.Default.Lock,
+                                    null,
+                                    modifier = Modifier.size(12.dp),
+                                    tint = MaterialTheme.colorScheme.primary,
+                                )
                                 Spacer(Modifier.width(4.dp))
-                                Text("מוצפן מקצה לקצה", fontSize = 11.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(
+                                    "מוצפן מקצה לקצה",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
                             }
                         }
                     }
                 },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "חזרה") } },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, "חזרה")
+                    }
+                },
             )
         },
         bottomBar = {
@@ -364,13 +392,14 @@ private fun ChatScreen(
                         draft = ""
                     },
                     modifier = Modifier.size(52.dp).clip(CircleShape).background(
-                        if (sendEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant
+                        if (sendEnabled) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.surfaceVariant
                     ),
                 ) {
                     Icon(Icons.AutoMirrored.Filled.Send, "שלח", tint = Color.White)
                 }
             }
-        }
+        },
     ) { padding ->
         LazyColumn(
             state = state,
@@ -378,7 +407,7 @@ private fun ChatScreen(
             verticalArrangement = Arrangement.spacedBy(6.dp),
         ) {
             item { Spacer(Modifier.height(8.dp)) }
-            items(messages, key = { it.id }) { message -> MessageBubble(message) }
+            items(messages, key = { it.id }) { MessageBubble(it) }
             item { Spacer(Modifier.height(8.dp)) }
         }
     }
@@ -392,21 +421,39 @@ private fun MessageBubble(message: ChatMessage) {
     ) {
         Card(
             colors = CardDefaults.cardColors(
-                containerColor = if (message.outgoing) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceVariant
+                containerColor = if (message.outgoing) MaterialTheme.colorScheme.primaryContainer
+                else MaterialTheme.colorScheme.surfaceVariant
             ),
             shape = RoundedCornerShape(14.dp),
         ) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Text(message.body)
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(formatTime(message.timestamp), fontSize = 10.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        formatTime(message.timestamp),
+                        fontSize = 10.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     if (message.outgoing) {
                         Spacer(Modifier.width(5.dp))
                         when (message.status) {
                             MessageStatus.QUEUED -> Text("…", fontSize = 11.sp)
-                            MessageStatus.SENT -> Icon(Icons.Default.Check, null, modifier = Modifier.size(14.dp))
-                            MessageStatus.DELIVERED -> Icon(Icons.Default.DoneAll, null, modifier = Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
-                            MessageStatus.FAILED -> Text("!", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Bold)
+                            MessageStatus.SENT -> Icon(
+                                Icons.Default.Check,
+                                null,
+                                modifier = Modifier.size(14.dp),
+                            )
+                            MessageStatus.DELIVERED -> Icon(
+                                Icons.Default.DoneAll,
+                                null,
+                                modifier = Modifier.size(15.dp),
+                                tint = MaterialTheme.colorScheme.primary,
+                            )
+                            MessageStatus.FAILED -> Text(
+                                "!",
+                                color = MaterialTheme.colorScheme.error,
+                                fontWeight = FontWeight.Bold,
+                            )
                         }
                     }
                 }
@@ -416,9 +463,16 @@ private fun MessageBubble(message: ChatMessage) {
 }
 
 @Composable
-private fun PairingScreen(container: AppContainer, pending: List<PendingPairing>, modifier: Modifier) {
+private fun PairingScreen(
+    container: AppContainer,
+    pending: List<PendingPairing>,
+    modifier: Modifier,
+) {
     val context = LocalContext.current
-    LazyColumn(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    LazyColumn(
+        modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
         item {
             Card {
                 Column(Modifier.padding(18.dp)) {
@@ -428,10 +482,12 @@ private fun PairingScreen(container: AppContainer, pending: List<PendingPairing>
                         Text("צימוד אולטרסוני", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     }
                     Spacer(Modifier.height(8.dp))
-                    Text("שים את שני הטלפונים קרוב. באחד מהם לחץ על שידור בקשת צימוד. הצד השני ישיב אוטומטית.")
+                    Text("שים את שני הטלפונים קרוב. באחד מהם לחץ על שידור בקשת צימוד.")
                     Spacer(Modifier.height(14.dp))
                     Button(onClick = {
-                        if (!AcousticReceiverService.running.value) AcousticReceiverService.start(context)
+                        if (!AcousticReceiverService.running.value) {
+                            AcousticReceiverService.start(context)
+                        }
                         container.engine.startPairing()
                     }) {
                         Icon(Icons.Default.PersonAdd, null)
@@ -443,7 +499,12 @@ private fun PairingScreen(container: AppContainer, pending: List<PendingPairing>
         }
 
         if (pending.isEmpty()) {
-            item { Text("אין בקשות שממתינות לאישור.", color = MaterialTheme.colorScheme.onSurfaceVariant) }
+            item {
+                Text(
+                    "אין בקשות שממתינות לאישור.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
         } else {
             items(pending, key = { it.deviceId }) { pairing ->
                 Card {
@@ -465,7 +526,9 @@ private fun PairingScreen(container: AppContainer, pending: List<PendingPairing>
                                 Text("הקוד זהה")
                             }
                             Spacer(Modifier.width(8.dp))
-                            OutlinedButton(onClick = { container.engine.rejectPairing(pairing.deviceId) }) {
+                            OutlinedButton(onClick = {
+                                container.engine.rejectPairing(pairing.deviceId)
+                            }) {
                                 Icon(Icons.Default.Close, null)
                                 Spacer(Modifier.width(5.dp))
                                 Text("דחה")
@@ -481,15 +544,30 @@ private fun PairingScreen(container: AppContainer, pending: List<PendingPairing>
 @Composable
 private fun SettingsScreen(container: AppContainer, running: Boolean, modifier: Modifier) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val received by AcousticReceiverService.receivedFrames.collectAsState()
     val crcErrors by AcousticReceiverService.crcErrors.collectAsState()
     val signal by AcousticReceiverService.lastSignalDb.collectAsState()
     var displayName by remember { mutableStateOf(container.identity.displayName) }
     var profileId by remember { mutableStateOf(container.settings.acousticProfileId) }
+    var fecEnabled by remember { mutableStateOf(container.settings.fecEnabled) }
+    var calibrating by remember { mutableStateOf(false) }
+    var calibrationText by remember {
+        mutableStateOf(
+            if (container.settings.calibratedAt > 0L) {
+                "כיול אחרון: ${String.format(Locale.US, "%.1f", container.settings.calibrationScore)} dB"
+            } else {
+                "עדיין לא בוצע כיול חומרה"
+            }
+        )
+    }
     val micUltra = remember { AcousticProfile.microphoneSupport(context) }
     val speakerUltra = remember { AcousticProfile.speakerSupport(context) }
 
-    LazyColumn(modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+    LazyColumn(
+        modifier.fillMaxSize().padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
         item {
             Text("זהות", fontSize = 19.sp, fontWeight = FontWeight.Bold)
             OutlinedTextField(
@@ -500,7 +578,9 @@ private fun SettingsScreen(container: AppContainer, running: Boolean, modifier: 
                 singleLine = true,
             )
             Spacer(Modifier.height(8.dp))
-            FilledTonalButton(onClick = { container.identity.displayName = displayName }) { Text("שמור שם") }
+            FilledTonalButton(onClick = { container.identity.displayName = displayName }) {
+                Text("שמור שם")
+            }
             Text(
                 "ID: ${container.identity.deviceUuid.toString().take(13)}…",
                 fontSize = 12.sp,
@@ -508,30 +588,87 @@ private fun SettingsScreen(container: AppContainer, running: Boolean, modifier: 
             )
         }
 
-        item { Divider() }
+        item { HorizontalDivider() }
         item {
             Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.weight(1f)) {
                     Text("מקלט ברקע", fontSize = 19.sp, fontWeight = FontWeight.Bold)
-                    Text("נדרש כדי לקבל הודעות כשהמסך כבוי.", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        "נדרש כדי לקבל הודעות כשהמסך כבוי.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
                 Switch(
                     checked = running,
                     onCheckedChange = { enabled ->
                         container.settings.receiverEnabled = enabled
-                        if (enabled) AcousticReceiverService.start(context) else AcousticReceiverService.stop(context)
-                    }
+                        if (enabled) AcousticReceiverService.start(context)
+                        else AcousticReceiverService.stop(context)
+                    },
                 )
             }
         }
 
-        item { Divider() }
+        item { HorizontalDivider() }
+        item {
+            Text("כיול אולטרסוני", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+            Text(
+                "הטלפון משדר סדרת תדרים ומודד דרך המיקרופון אילו תדרים עוברים בצורה נקייה.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(8.dp))
+            if (calibrating) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))
+                Text("מכייל… השאר את עוצמת המדיה גבוהה ואל תכסה את הרמקול או המיקרופון.")
+            } else {
+                Button(onClick = {
+                    calibrating = true
+                    val wasRunning = AcousticReceiverService.running.value
+                    if (wasRunning) AcousticReceiverService.stop(context)
+                    scope.launch {
+                        try {
+                            kotlinx.coroutines.delay(350L)
+                            val result = withContext(Dispatchers.IO) {
+                                AcousticCalibrator().run()
+                            }
+                            container.settings.acousticProfileId = result.recommendedProfile.id
+                            container.settings.calibratedAt = System.currentTimeMillis()
+                            container.settings.calibrationScore = result.scoreDb.toFloat()
+                            profileId = result.recommendedProfile.id
+                            calibrationText = buildString {
+                                append(if (result.strictUsable) "Strict תקין" else "Strict חלש")
+                                append(" · ")
+                                append(String.format(Locale.US, "%.1f dB", result.scoreDb))
+                                append(" · נבחר ")
+                                append(result.recommendedProfile.displayName)
+                            }
+                        } catch (error: Throwable) {
+                            calibrationText = "הכיול נכשל: ${error.message ?: error.javaClass.simpleName}"
+                        } finally {
+                            calibrating = false
+                            if (wasRunning || container.settings.receiverEnabled) {
+                                AcousticReceiverService.start(context)
+                            }
+                        }
+                    }
+                }) {
+                    Icon(Icons.Default.Tune, null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("כייל עכשיו")
+                }
+            }
+            Spacer(Modifier.height(6.dp))
+            Text(calibrationText, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+
+        item { HorizontalDivider() }
         item {
             Text("תחום תדרים", fontSize = 19.sp, fontWeight = FontWeight.Bold)
             ProfileChoice(
                 profile = AcousticProfile.STRICT,
                 selected = profileId == AcousticProfile.STRICT.id,
-                description = "20.2–21.8 kHz · ברירת מחדל. מיועד להיות מחוץ לטווח השמיעה, אך תלוי בחומרה.",
+                description = "20.2–21.8 kHz · שקט יותר, דורש חומרה שתומכת בתחום הגבוה.",
             ) {
                 profileId = AcousticProfile.STRICT.id
                 container.settings.acousticProfileId = profileId
@@ -539,30 +676,59 @@ private fun SettingsScreen(container: AppContainer, running: Boolean, modifier: 
             ProfileChoice(
                 profile = AcousticProfile.COMPATIBLE,
                 selected = profileId == AcousticProfile.COMPATIBLE.id,
-                description = "18.8–20.4 kHz · תאימות גבוהה יותר. עלול להיות נשמע אצל אנשים צעירים.",
+                description = "18.8–20.4 kHz · תאימות טובה יותר, חלק מהתחום עלול להיות נשמע.",
             ) {
                 profileId = AcousticProfile.COMPATIBLE.id
                 container.settings.acousticProfileId = profileId
             }
         }
 
-        item { Divider() }
+        item { HorizontalDivider() }
+        item {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.weight(1f)) {
+                    Text("Robust mode", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        "מוסיף Hamming SECDED לכל מקטע. מתקן שגיאת ביט בודדת אך מכפיל בערך את זמן השידור.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = fecEnabled,
+                    onCheckedChange = {
+                        fecEnabled = it
+                        container.settings.fecEnabled = it
+                    },
+                )
+            }
+        }
+
+        item { HorizontalDivider() }
         item {
             Text("Diagnostics", fontSize = 19.sp, fontWeight = FontWeight.Bold)
             DiagnosticRow("Near-ultrasound microphone", supportText(micUltra))
             DiagnosticRow("Near-ultrasound speaker", supportText(speakerUltra))
             DiagnosticRow("Receiver", if (running) "ACTIVE" else "OFF")
+            DiagnosticRow("Profile", AcousticProfile.fromId(profileId).displayName)
+            DiagnosticRow("FEC", if (fecEnabled) "HAMMING 8/4" else "OFF")
             DiagnosticRow("Frames received", received.toString())
             DiagnosticRow("CRC / decode errors", crcErrors.toString())
-            DiagnosticRow("Last signal", signal?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "—")
+            DiagnosticRow(
+                "Last signal",
+                signal?.let { String.format(Locale.US, "%.1f dBFS", it) } ?: "—",
+            )
         }
 
         item {
-            Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Card(
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant
+                )
+            ) {
                 Row(Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.VolumeOff, null)
                     Spacer(Modifier.width(10.dp))
-                    Text("Aharon Message אינו מקליט או שומר אודיו. הדגימות נבדקות בזיכרון ונזרקות לאחר הפענוח.")
+                    Text("Aharon Message לא שומר אודיו. דגימות המיקרופון מעובדות בזיכרון ונזרקות.")
                 }
             }
         }
@@ -599,10 +765,15 @@ private fun DiagnosticRow(label: String, value: String) {
 @Composable
 private fun Avatar(name: String, size: Int = 48) {
     Box(
-        modifier = Modifier.size(size.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary),
+        modifier = Modifier.size(size.dp).clip(CircleShape)
+            .background(MaterialTheme.colorScheme.primary),
         contentAlignment = Alignment.Center,
     ) {
-        Text(name.trim().firstOrNull()?.uppercase() ?: "?", color = Color.White, fontWeight = FontWeight.Bold)
+        Text(
+            name.trim().firstOrNull()?.uppercase() ?: "?",
+            color = Color.White,
+            fontWeight = FontWeight.Bold,
+        )
     }
 }
 
