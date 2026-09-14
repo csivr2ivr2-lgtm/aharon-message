@@ -8,6 +8,7 @@ import com.aharon.message.model.ChatMessage
 import com.aharon.message.model.Contact
 import com.aharon.message.model.MessageStatus
 import com.aharon.message.model.PendingPairing
+import com.aharon.message.protocol.Hamming84
 import com.aharon.message.protocol.PacketType
 import com.aharon.message.protocol.ProtocolCodec
 import com.aharon.message.protocol.ProtocolPacket
@@ -20,7 +21,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.util.UUID
+import java.io.ByteArrayOutputStream
 import java.util.concurrent.ConcurrentHashMap
 
 class MessagingEngine(
@@ -34,8 +35,23 @@ class MessagingEngine(
         val notification: NotificationEvent? = null,
     )
 
+    private data class OutgoingTransfer(
+        val contactId: String,
+        val totalFragments: Int,
+        val acknowledged: MutableSet<Int> = ConcurrentHashMap.newKeySet(),
+    )
+
+    private data class IncomingTransfer(
+        val contactId: String,
+        val totalFragments: Int,
+        val chunks: Array<ByteArray?>,
+        var updatedAt: Long,
+    )
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val retryJobs = ConcurrentHashMap<Long, Boolean>()
+    private val outgoingTransfers = ConcurrentHashMap<Long, OutgoingTransfer>()
+    private val incomingTransfers = ConcurrentHashMap<String, IncomingTransfer>()
 
     private val _contacts = MutableStateFlow(store.listContacts())
     val contacts: StateFlow<List<Contact>> = _contacts.asStateFlow()
@@ -92,7 +108,7 @@ class MessagingEngine(
         val normalized = text.trim()
         if (normalized.isEmpty()) return
         val bytes = normalized.toByteArray(Charsets.UTF_8)
-        require(bytes.size <= 512) { "Message is limited to 512 UTF-8 bytes" }
+        require(bytes.size <= MAX_MESSAGE_BYTES) { "Message is limited to $MAX_MESSAGE_BYTES UTF-8 bytes" }
 
         val messageId = identity.newMessageId()
         val message = ChatMessage(
@@ -105,25 +121,36 @@ class MessagingEngine(
         )
         store.insertMessage(message)
         refresh()
-        AcousticReceiverService.enqueue(context, buildDataPacket(message, contact))
+
+        val packets = buildFragmentPackets(message, contact)
+        outgoingTransfers[messageId] = OutgoingTransfer(contact.deviceId, packets.size)
+        packets.forEach { AcousticReceiverService.enqueue(context, it) }
     }
 
     fun onPacketTransmitted(packet: ProtocolPacket) {
-        if (packet.type != PacketType.DATA) return
+        if (packet.type != PacketType.DATA && packet.type != PacketType.DATA_FRAGMENT) return
         val message = store.messageById(packet.messageId) ?: return
         if (!message.outgoing || message.status == MessageStatus.DELIVERED) return
-        store.updateMessageStatus(message.id, MessageStatus.SENT, message.retryCount)
-        refresh()
+        if (message.status == MessageStatus.QUEUED) {
+            store.updateMessageStatus(message.id, MessageStatus.SENT, message.retryCount)
+            refresh()
+        }
         scheduleRetry(message.id)
     }
 
     fun resumeRetries() {
         store.listMessages()
             .filter { it.outgoing && it.status == MessageStatus.SENT && it.retryCount < MAX_RETRIES }
-            .forEach { scheduleRetry(it.id, initialDelayMs = 2_000L) }
+            .forEach { message ->
+                val contact = store.contactByDeviceId(message.contactId) ?: return@forEach
+                val packets = buildFragmentPackets(message, contact)
+                outgoingTransfers.putIfAbsent(message.id, OutgoingTransfer(contact.deviceId, packets.size))
+                scheduleRetry(message.id, initialDelayMs = 2_000L)
+            }
     }
 
     fun handleIncoming(packet: ProtocolPacket): IncomingResult {
+        cleanupStaleTransfers()
         if (packet.senderId == identity.transportId()) return IncomingResult()
         if (packet.receiverId != ProtocolCodec.BROADCAST_ID && packet.receiverId != identity.transportId()) {
             return IncomingResult()
@@ -132,8 +159,10 @@ class MessagingEngine(
         return when (packet.type) {
             PacketType.PAIR_REQUEST -> handlePair(packet, respond = true)
             PacketType.PAIR_RESPONSE -> handlePair(packet, respond = false)
-            PacketType.DATA -> handleData(packet)
-            PacketType.ACK -> handleAck(packet)
+            PacketType.DATA -> handleLegacyData(packet)
+            PacketType.ACK -> handleLegacyAck(packet)
+            PacketType.DATA_FRAGMENT -> handleFragment(packet)
+            PacketType.ACK_FRAGMENT -> handleFragmentAck(packet)
             PacketType.PING -> IncomingResult(
                 replies = listOf(
                     ProtocolPacket(
@@ -144,7 +173,9 @@ class MessagingEngine(
                     )
                 )
             )
-            PacketType.PONG -> IncomingResult()
+            PacketType.PONG,
+            PacketType.CALIBRATION_PROBE,
+            PacketType.CALIBRATION_RESULT -> IncomingResult()
         }
     }
 
@@ -190,14 +221,100 @@ class MessagingEngine(
         )
     }
 
-    private fun handleData(packet: ProtocolPacket): IncomingResult {
+    private fun handleFragment(packet: ProtocolPacket): IncomingResult {
+        val contact = store.contactByTransportId(packet.senderId) ?: return IncomingResult()
+        val fragment = ProtocolCodec.decodeFragmentPayload(packet.payload) ?: return IncomingResult()
+        val publicKey = Base64.decode(contact.publicKeyBase64, Base64.NO_WRAP)
+        val protected = Hamming84.decode(fragment.encryptedChunk) ?: return IncomingResult()
+        val plaintext = runCatching {
+            identity.decrypt(
+                publicKey,
+                protected,
+                ProtocolCodec.fragmentAad(packet, fragment.sequence, fragment.total),
+            )
+        }.getOrNull() ?: return IncomingResult()
+
+        val ack = ProtocolPacket(
+            type = PacketType.ACK_FRAGMENT,
+            senderId = identity.transportId(),
+            receiverId = packet.senderId,
+            messageId = packet.messageId,
+            payload = ProtocolCodec.encodeFragmentAck(fragment.sequence, fragment.total),
+        )
+
+        if (store.messageById(packet.messageId) != null) {
+            return IncomingResult(replies = listOf(ack))
+        }
+
+        val key = "${packet.senderId}:${packet.messageId}"
+        val transfer = incomingTransfers.compute(key) { _, existing ->
+            if (existing == null || existing.totalFragments != fragment.total) {
+                IncomingTransfer(
+                    contactId = contact.deviceId,
+                    totalFragments = fragment.total,
+                    chunks = arrayOfNulls(fragment.total),
+                    updatedAt = System.currentTimeMillis(),
+                )
+            } else {
+                existing.updatedAt = System.currentTimeMillis()
+                existing
+            }
+        } ?: return IncomingResult(replies = listOf(ack))
+
+        transfer.chunks[fragment.sequence] = plaintext
+        if (transfer.chunks.any { it == null }) {
+            return IncomingResult(replies = listOf(ack))
+        }
+
+        val assembled = ByteArrayOutputStream().use { output ->
+            transfer.chunks.forEach { output.write(checkNotNull(it)) }
+            output.toByteArray()
+        }
+        incomingTransfers.remove(key)
+        if (assembled.size > MAX_MESSAGE_BYTES) return IncomingResult(replies = listOf(ack))
+        val body = assembled.toString(Charsets.UTF_8)
+        if (body.isBlank()) return IncomingResult(replies = listOf(ack))
+
+        store.insertMessage(
+            ChatMessage(
+                id = packet.messageId,
+                contactId = contact.deviceId,
+                outgoing = false,
+                body = body,
+                timestamp = System.currentTimeMillis(),
+                status = MessageStatus.DELIVERED,
+            )
+        )
+        refresh()
+        return IncomingResult(
+            replies = listOf(ack),
+            notification = NotificationEvent(contact.name, body),
+        )
+    }
+
+    private fun handleFragmentAck(packet: ProtocolPacket): IncomingResult {
+        val (sequence, total) = ProtocolCodec.decodeFragmentAck(packet.payload) ?: return IncomingResult()
+        val transfer = outgoingTransfers[packet.messageId] ?: return IncomingResult()
+        if (transfer.totalFragments != total || sequence !in 0 until total) return IncomingResult()
+        transfer.acknowledged += sequence
+        if (transfer.acknowledged.size >= transfer.totalFragments) {
+            val message = store.messageById(packet.messageId) ?: return IncomingResult()
+            store.updateMessageStatus(message.id, MessageStatus.DELIVERED, message.retryCount)
+            outgoingTransfers.remove(packet.messageId)
+            retryJobs.remove(packet.messageId)
+            refresh()
+        }
+        return IncomingResult()
+    }
+
+    private fun handleLegacyData(packet: ProtocolPacket): IncomingResult {
         val contact = store.contactByTransportId(packet.senderId) ?: return IncomingResult()
         val publicKey = Base64.decode(contact.publicKeyBase64, Base64.NO_WRAP)
         val plaintext = runCatching {
             identity.decrypt(publicKey, packet.payload, ProtocolCodec.aad(packet))
         }.getOrNull() ?: return IncomingResult()
         val body = plaintext.toString(Charsets.UTF_8)
-        if (body.isBlank() || body.toByteArray(Charsets.UTF_8).size > 512) return IncomingResult()
+        if (body.isBlank() || body.toByteArray(Charsets.UTF_8).size > MAX_MESSAGE_BYTES) return IncomingResult()
 
         if (store.messageById(packet.messageId) == null) {
             store.insertMessage(
@@ -225,30 +342,39 @@ class MessagingEngine(
         )
     }
 
-    private fun handleAck(packet: ProtocolPacket): IncomingResult {
+    private fun handleLegacyAck(packet: ProtocolPacket): IncomingResult {
         val message = store.messageById(packet.messageId) ?: return IncomingResult()
         if (message.outgoing) {
             store.updateMessageStatus(message.id, MessageStatus.DELIVERED, message.retryCount)
             retryJobs.remove(message.id)
+            outgoingTransfers.remove(message.id)
             refresh()
         }
         return IncomingResult()
     }
 
-    private fun buildDataPacket(message: ChatMessage, contact: Contact): ProtocolPacket {
-        val shell = ProtocolPacket(
-            type = PacketType.DATA,
-            senderId = identity.transportId(),
-            receiverId = contact.transportId,
-            messageId = message.id,
-        )
+    private fun buildFragmentPackets(message: ChatMessage, contact: Contact): List<ProtocolPacket> {
+        val source = message.body.toByteArray(Charsets.UTF_8)
+        val chunks = source.asList().chunked(ProtocolCodec.MESSAGE_CHUNK_BYTES)
+            .map { part -> ByteArray(part.size) { index -> part[index] } }
+        val total = chunks.size.coerceAtLeast(1)
         val publicKey = Base64.decode(contact.publicKeyBase64, Base64.NO_WRAP)
-        val encrypted = identity.encrypt(
-            publicKey,
-            message.body.toByteArray(Charsets.UTF_8),
-            ProtocolCodec.aad(shell),
-        )
-        return shell.copy(payload = encrypted)
+
+        return chunks.mapIndexed { sequence, chunk ->
+            val shell = ProtocolPacket(
+                type = PacketType.DATA_FRAGMENT,
+                senderId = identity.transportId(),
+                receiverId = contact.transportId,
+                messageId = message.id,
+            )
+            val encrypted = identity.encrypt(
+                publicKey,
+                chunk,
+                ProtocolCodec.fragmentAad(shell, sequence, total),
+            )
+            val fec = Hamming84.encode(encrypted)
+            shell.copy(payload = ProtocolCodec.encodeFragmentPayload(sequence, total, fec))
+        }
     }
 
     private fun scheduleRetry(messageId: Long, initialDelayMs: Long = RETRY_DELAY_MS) {
@@ -265,10 +391,19 @@ class MessagingEngine(
                         break
                     }
                     val contact = store.contactByDeviceId(message.contactId) ?: break
+                    val allPackets = buildFragmentPackets(message, contact)
+                    val transfer = outgoingTransfers.computeIfAbsent(messageId) {
+                        OutgoingTransfer(contact.deviceId, allPackets.size)
+                    }
                     val nextRetry = message.retryCount + 1
                     store.updateMessageStatus(message.id, MessageStatus.SENT, nextRetry)
                     refresh()
-                    AcousticReceiverService.enqueue(context, buildDataPacket(message.copy(retryCount = nextRetry), contact))
+
+                    allPackets.forEachIndexed { index, packet ->
+                        if (index !in transfer.acknowledged) {
+                            AcousticReceiverService.enqueue(context, packet)
+                        }
+                    }
                     delay(RETRY_DELAY_MS * (nextRetry + 1))
                 }
             } finally {
@@ -277,8 +412,15 @@ class MessagingEngine(
         }
     }
 
+    private fun cleanupStaleTransfers() {
+        val cutoff = System.currentTimeMillis() - INCOMING_TRANSFER_TTL_MS
+        incomingTransfers.entries.removeIf { it.value.updatedAt < cutoff }
+    }
+
     companion object {
-        private const val MAX_RETRIES = 3
-        private const val RETRY_DELAY_MS = 6_000L
+        private const val MAX_RETRIES = 4
+        private const val RETRY_DELAY_MS = 5_000L
+        private const val MAX_MESSAGE_BYTES = 512
+        private const val INCOMING_TRANSFER_TTL_MS = 120_000L
     }
 }
